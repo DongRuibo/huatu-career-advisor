@@ -1,1 +1,111 @@
-# huatu-career-advisor
+# AI 职业规划辅助系统
+
+基于模拟咨询对话抽取职业偏好，按明确的硬条件和软偏好匹配模拟岗位，并提供岗位讲解、待确认问题和职业规划报告。当前学历、政治面貌和经验只用于未来准备提示。
+
+## 启动与演示
+
+在项目根目录执行。使用 Python 3.12、`uv` 和 Docker Compose。
+
+1. 首次配置时执行 `cp .env.example .env`，在 `.env` 设置 `POSTGRES_PASSWORD`、`LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。模型地址支持 `/v1` 基地址和完整 `/chat/completions` 地址。
+2. 启动数据库、导入工作簿并启动接口。
+
+   ```bash
+   uv sync --locked
+   docker compose up -d --wait db
+   uv run --locked --env-file .env python -m app.etl
+   uv run --locked --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
+
+3. 在 Swagger 打开 [接口文档](http://127.0.0.1:8000/docs)。另开终端运行演示，并查看三个场景的画像、候选数、讲解、追问和报告摘要。
+
+   ```bash
+   uv run --locked python -m scripts.demo --base-url http://127.0.0.1:8000
+   ```
+
+已有阶段二数据卷时，先启动数据库，再执行以下命令升级表结构并迁移旧建议。新数据卷首次初始化会自动执行建表脚本。
+
+```bash
+docker compose exec -T db sh -c 'psql -1 -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/schema.sql
+```
+
+## Swagger 流程
+
+在每个接口点击 **Try it out**。`session_id` 使用创建会话获得的 UUID。
+
+| 顺序 | 方法与路径 | 示例输入或操作 |
+|---|---|---|
+| 1 | `POST /sessions` | 创建 `future_planning` 会话，复制 `session_id` |
+| 2 | `POST /sessions/{session_id}/turns` | `{"speaker":"家长","text":"我们只考虑成都市的体制内岗位，尽量稳定，不希望经常出差。"}` |
+| 3 | `POST /sessions/{session_id}/turns` | `{"speaker":"家长","text":"重庆也可以考虑"}`，查看返回的修正记录 |
+| 4 | `GET /sessions/{session_id}/preferences` | 查看正式画像、待确认建议、资格和修正记录 |
+| 5 | `GET /sessions/{session_id}/matches` | 查看得分、覆盖统计、匹配依据与资格差距 |
+| 6 | `GET /sessions/{session_id}/jobs/{job_id}/explain` | 使用 `P012` 查看岗位讲解与缺失说明 |
+| 7 | `GET /sessions/{session_id}/questions` | 查看最多两条未明确偏好的追问 |
+| 8 | `GET /sessions/{session_id}/report` | `format=md&top_n=5` 返回 Markdown，`format=json` 返回 JSON |
+
+`PUT /sessions/{session_id}/preferences/{tag_id}` 使用以下两种请求体。确认建议时使用该建议返回的 `evidence_turn_id`。确认后重新调用匹配接口。
+
+```json
+{"action":"set","value":["成都","重庆"],"strength":"hard","constraint_type":"in"}
+```
+
+```json
+{"action":"confirm","evidence_turn_id":42}
+```
+
+### curl 示例
+
+```bash
+base=http://127.0.0.1:8000
+curl -sS -X POST "$base/sessions"
+# 替换为创建会话返回的 session_id
+sid=替换成会话UUID
+curl -sS -X POST "$base/sessions/$sid/turns" \
+  -H 'Content-Type: application/json' \
+  -d '{"speaker":"家长","text":"只考虑成都的体制内岗位，完全不能出差。"}'
+curl -sS "$base/sessions/$sid/preferences"
+curl -sS "$base/sessions/$sid/matches"
+curl -sS "$base/sessions/$sid/jobs/P012/explain"
+curl -sS "$base/sessions/$sid/questions"
+curl -sS "$base/sessions/$sid/report?format=md&top_n=5"
+curl -sS -G "$base/jobs" --data-urlencode 'city=成都' --data-urlencode 'direction=体制内' --data-urlencode 'tag=T005:多'
+curl -sS "$base/import/issues"
+```
+
+`GET /jobs/{job_id}` 查询岗位详情。`POST /jobs` 增加岗位，`PUT /jobs/{job_id}` 修改传入字段。`tags` 可写 T003–T016，值形如 `{"T005":{"value":"多","evidence":"模拟事实依据"}}`。省略 `tags` 保留现有业务标签，传 `{}` 清空业务标签。T001、T002、T017–T020 自动同步，字段与标签在一个事务内保存。`GET /import/issues?run_id=...` 查询指定导入批次。
+
+## 数据处理与匹配规则
+
+- 文本首尾空白会清理并记录，P011 的城市归一为成都。相同岗位记录去重，P006 只保留一条。冲突版本优先取唯一最新版本，无法判断时隔离并记录 `CONFLICT_UNRESOLVED`。
+- 岗位关键字段缺失会保留记录并关闭匹配，P021 缺城市。缺 ID 时按来源行和内容生成可重复的内部 ID。非法枚举转为未知。P012 缺 T008、P019 缺 T009、P020 缺 T011，导入报告也列出 P021 的缺失标签。标签缺失时保留未知。
+- 每次导入在一个事务内执行。重跑同步本批岗位的标签，清除失效旧值并保留历史报告。给定表格共有 22 行岗位，入库 21 个唯一岗位。
+- 硬条件按城市、方向、出差上限过滤，未知硬条件保留并标记待确认。软偏好已知项等权平均，未知项同时从分子和分母排除。返回参与评分及未知项的数量。资料不足时总分可为空，同分按岗位 ID 排序。
+- 模型提议由 Pydantic、字典、说话人和本轮原话核验。咨询师问题仅保存为发言。T007、T012 的间接推断先写待确认建议，显式确认才进入画像。
+- 追问区分度为已知覆盖率乘以已知取值的基尼不纯度。模型仅改写代码选出的标签问题。没有可区分的标签时返回空列表。
+
+## 验收命令
+
+```bash
+# 离线单元测试
+uv run --locked python -m pytest -q
+
+# 全量本地测试，数据库用例在临时独立 schema 中运行
+HUATU_TEST_POSTGRES=1 uv run --locked --env-file .env python -m pytest -q -W error
+
+# 单独运行真实模型验收
+HUATU_TEST_POSTGRES=1 HUATU_RUN_LIVE_LLM=1 \
+  uv run --locked --env-file .env python -m pytest -q -s tests/test_live_llm.py
+```
+
+模拟模型测试使用固定响应，测试非法标签、证据、角色、损坏响应与服务异常。真实测试以工作簿模拟对话、标签字典及相应岗位资料为输入，输出三组候选基线与调用次数。S-A 为 6 → 11，S-B 为 17，S-C 为 4 → 11。
+
+## 简化范围与技术取舍
+
+- 服务面向本地考核，使用同步 PostgreSQL 和同步模型客户端。匹配规则读取小型岗位集并在 Python 中计算，报告默认取前 5 名。模型语言输出可能随服务或版本变化。
+- 岗位讲解组织可核对的资料原句，程序校验引用并过滤违规内容。追问措辞由模型优化。职业建议从匹配结果支持的准备事项中选取和排序。咨询生成失败时使用资料支持的回退内容；抽取请求失败时本轮不写入画像。
+- 知识库为按岗位 ID 管理的资料表，交付形式是 API、Swagger 和命令行演示。报告直接返回 JSON 或 Markdown。
+
+## 扩展方案
+
+- **数百万岗位、数千标签**。先用 `job_tags(tag_id, value)` 倒排索引或位图执行硬条件，缩小候选后再按确定性规则评分。高并发多条件检索可交给 OpenSearch，常用标签可做宽表物化，批量预计算稳定特征并缓存热门画像结果。随数据量再考虑分库分表与读写分离。
+- **实时语音转写**。用 WebSocket 接入流式 ASR，按说话人分离并识别家长、学生、咨询师。在句子边界形成完整发言，复用 `/turns` 入口，将抽取异步化，继续增量更新画像和原话证据。
