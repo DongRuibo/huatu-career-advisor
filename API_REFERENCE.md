@@ -160,7 +160,8 @@ FastAPI 另提供 [Swagger](http://127.0.0.1:8000/docs)、[ReDoc](http://127.0.0
 匹配明细中的 `tag_id`、`tag_name` 标识评估维度，`preference_value` 是用户偏好，`job_value` 是岗位实际取值，`evidence` 是岗位事实依据。每条还有 `status`、`score`、`detail` 三个字段。硬条件明细与未知项的单项评分可以是 `null`。
 
 - **偏好明细状态**有 `confirmed`（硬条件满足）、`pending_confirmation`（待确认）、`matched`（软偏好满足）、`partially_matched`（部分满足）、`unmet`（未满足）。
-- **资格提示状态**有 `meets_requirement`（满足参考要求）、`preparation_needed`（需要准备）、`pending_confirmation`（待确认）、`reference_only`（仅供参考）。资格用来提示准备事项，岗位仍可进入未来规划候选。
+- **资格提示状态**有 `meets_requirement`（满足参考要求）、`preparation_needed`（学历或经验差距可提前准备）、`pending_confirmation`（资料或对应关系待确认）、`reference_only`（专业要求或已知的政治面貌差异）。政治面貌差异需按实际招聘公告核实。资格提示不参与候选筛选或评分。
+- **排序**先展示 `confirmed`，再展示 `pending_confirmation`。各组按软偏好分数降序排列，无分数的岗位排在该组最后，同分按岗位 ID 升序排列。
 - **读分示例**。S-A 特定画像下 P012 的稳定性为 1 分、群众接触为 0.5 分，收入未知。结果为 `score: 0.75`，评分覆盖为 2 项已评分、1 项未知。未知项在平均时跳过，已知不满足的 0 分计入平均。同分按岗位 ID 排序。
 
 ### GET `/sessions/{session_id}/jobs/{job_id}/explain`
@@ -213,7 +214,7 @@ FastAPI 另提供 [Swagger](http://127.0.0.1:8000/docs)、[ReDoc](http://127.0.0
 | `job_details_to_confirm` | 推荐清单里需要核实的岗位信息，每项含 `job_id`、`tag_id`、`message` |
 | `advice` | 职业规划建议文本列表 |
 
-Markdown 展示当前意向、岗位的主要匹配依据和未知项、待确认问题及下一步建议。评分明细、原话证据和偏好修改历史可通过 JSON 查看。模型从资料支持的建议中排序，失败时沿用规则顺序。
+Markdown 展示职业意向概览、岗位匹配概况、推荐岗位和主要依据、待确认问题及职业规划建议。评分明细、原话证据和偏好修改历史可通过 JSON 查看。模型从程序提供的建议中选择和排序，失败时沿用规则顺序。政治面貌差异出现在岗位资格参考中。
 
 ## 5. 岗位查询与维护
 
@@ -226,6 +227,8 @@ Markdown 展示当前意向、岗位的主要匹配依据和未知项、待确�
 | `city` | `成都` | 精确匹配工作城市 |
 | `direction` | `体制内` | 精确匹配工作簿的「所属方向」，对应原题的行业筛选 |
 | `tag` | `T005:多` | 精确匹配一项岗位标签，格式为「标签 ID:标签值」 |
+
+模拟工作簿缺少独立的行业分类字段。接入真实行业数据后，可新增独立的 `industry` 字段和查询条件，继续用 `direction` 筛选所属方向。
 
 岗位结果中的 `is_matchable` 表示是否进入匹配，这个列表也可查到标记为 `false` 的岗位。无命中时返回 `[]`。标签参数缺少冒号、ID 或值时返回 **422**。
 

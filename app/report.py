@@ -93,11 +93,11 @@ def build_report(session_id: UUID, top_n: int, model: JsonModel | None = None) -
     else:
         options["review"] = "和学生逐项确认哪些条件必须满足。如果有可以放宽的条件，调整后再比较候选岗位。"
 
-    # 按资格类型合并准备事项，让同一条建议能覆盖多个岗位及其不同差距。
+    # 学历和工作经验差距可转为准备事项，其他资格仍在岗位参考中展示。
     qualification_jobs: dict[str, list[str]] = {}
     for job in recommended:
         for hint in job.qualification_hints:
-            if hint.status == "preparation_needed":
+            if hint.tag_id in {"T017", "T018"} and hint.status == "preparation_needed":
                 qualification_jobs.setdefault(hint.tag_id, []).append(job.job_id)
     preparation = []
     for tag_id, job_ids in qualification_jobs.items():

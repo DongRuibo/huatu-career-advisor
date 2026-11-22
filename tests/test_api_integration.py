@@ -132,6 +132,9 @@ def test_report_explains_single_preference_scores_and_keeps_audit(postgres_test_
             assert audit["recommended_jobs"] == matches[:5]
             assert [job["job_id"] for job in matches[:5]] == ["P001", "P002", "P009", "P018", "P019"]
             assert all(job["score"] == 1.0 for job in matches[:5])
+            p019 = next(job for job in audit["recommended_jobs"] if job["job_id"] == "P019")
+            political_hint = next(hint for hint in p019["qualification_hints"] if hint["tag_id"] == "T019")
+            assert political_hint["status"] == "reference_only"
             assert audit["preference_changes"][1]["old_value"] == ["成都"]
             assert audit["preference_changes"][1]["new_value"] == ["成都", "重庆"]
             assert matches[0]["match_reasons"][0]["evidence"]
@@ -145,10 +148,21 @@ def test_report_explains_single_preference_scores_and_keeps_audit(postgres_test_
             assert all(token not in report for token in ("T001", "用户手动修改", "原始数据第", "→", "得分 1.00"))
             assert report.count("\n| P") == 5
             assert "群众接触程度为多" in report and "参考工作经验要求为2年" in report
-            advice = report.split("## 职业规划建议", 1)[1]
+            overview, advice = report.split("## 职业规划建议", 1)
+            assert political_hint["detail"] in overview
             assert "先对比 P001、P002、P018" in advice and "P009、P019" in advice
-            assert "P019 的政治面貌" in advice and "核实哪些经历可计入工作经验" in advice
+            assert "政治面貌" not in advice and "核实哪些经历可计入工作经验" in advice
             assert "选出最看重的一项" in advice
+
+            # 移除一个满分岗位的出差标签，验证报告截取的是按硬条件状态排序后的前五项。
+            with connect() as conn:
+                conn.execute("DELETE FROM job_tags WHERE job_id = 'P001' AND tag_id = 'T003'")
+            mixed = (await client.get(base + "/matches")).json()
+            pending = mixed[-1]
+            assert (pending["job_id"], pending["hard_condition_status"], pending["score"]) == ("P001", "pending_confirmation", 1.0)
+            assert len(mixed) == 11 and mixed[4]["score"] < pending["score"]
+            mixed_report = (await client.get(base + "/report?format=json")).json()
+            assert mixed_report["recommended_jobs"] == mixed[:5]
 
     asyncio.run(execute())
 
@@ -219,7 +233,8 @@ def test_put_jobs_syncs_derived_fields_and_rolls_back_failed_writes(postgres_tes
                 "T001": "重庆", "T002": "体制内", "T005": "多", "T017": "硕士",
             }
             response = await client.get("/jobs", params={"city": "重庆", "direction": "体制内", "tag": "T005:多"})
-            assert "TEST-API" in {item["job_id"] for item in response.json()}
+            assert response.is_success
+            assert {item["job_id"] for item in response.json()} == {"P002", "P006", "P019", "TEST-API"}
             assert (await client.put(path, json={"city": "成都", "tags": {"T005": {"value": "很多"}}})).status_code == 422
             assert (await client.get(path)).json() == updated
 

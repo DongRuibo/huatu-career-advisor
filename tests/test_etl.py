@@ -6,7 +6,8 @@ from datetime import datetime
 
 from openpyxl import load_workbook
 
-from app.etl import DEFAULT_WORKBOOK, load_import_data
+from app.db import connect
+from app.etl import DEFAULT_WORKBOOK, get_import_report, import_workbook, load_import_data
 
 
 # 核对内置模拟 Excel 的岗位数、标签映射、知识资料和预期清洗问题。
@@ -37,6 +38,24 @@ def test_supplied_workbook():
     expected = {("P012", "T008"), ("P019", "T009"), ("P020", "T011"), ("P021", "T001")}
     expected.update(("P021", f"T{number:03d}") for number in range(3, 17))
     assert missing_tags == expected
+
+
+# 重跑同一工作簿后核对业务表和岗位时间戳，并保留两个独立导入批次。
+def test_workbook_reimport_preserves_business_rows_and_keeps_both_reports(postgres_test_schema):
+    queries = (
+        "SELECT * FROM jobs ORDER BY job_id", "SELECT * FROM tag_definitions ORDER BY tag_id",
+        "SELECT * FROM job_tags ORDER BY job_id, tag_id", "SELECT * FROM knowledge_docs ORDER BY doc_id",
+    )
+    with connect() as conn:
+        before = [conn.execute(query).fetchall() for query in queries]
+        first = get_import_report(conn)
+    second = import_workbook()
+    with connect() as conn:
+        assert [conn.execute(query).fetchall() for query in queries] == before
+        assert get_import_report(conn, first["run_id"]) == first
+    assert first["run_id"] != second["run_id"]
+    assert second["success_count"] == first["success_count"] == 21
+    assert second["issue_counts"] == first["issue_counts"]
 
 
 # 在临时工作簿中交换字段列并注入无效值，验证表头匹配和缺失 ID 的可重复生成。

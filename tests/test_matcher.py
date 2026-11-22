@@ -175,7 +175,27 @@ def test_unscored_candidates_follow_known_scores_and_same_score_orders_by_job_id
     assert all(item.score is None and item.scoring_coverage == ScoringCoverage(0, 0) for item in empty)
 
 
-# 比较填写和清空资格后的候选与分值，同时核对 P008 和 P019 的准备提示。
+# 已确认组优先，即使其分数更低或为空。各组仍按分数和岗位 ID 排序。
+def test_confirmed_candidates_precede_pending_even_with_lower_scores(dataset):
+    _, dictionary = dataset
+    profile = Profile({"T003": SA.preferences["T003"], "T004": preference("T004", "高")}, {}, [])
+    candidates = [
+        MatchJob("A-pending", "待确认高分", True, tags={"T004": JobTag("高")}),
+        MatchJob("Z-confirmed", "已确认零分", True, tags={"T003": JobTag("无"), "T004": JobTag("低")}),
+        MatchJob("B-confirmed", "已确认零分", True, tags={"T003": JobTag("偶尔"), "T004": JobTag("低")}),
+        MatchJob("A-confirmed", "已确认未评分", True, tags={"T003": JobTag("无")}),
+        MatchJob("B-pending", "待确认低分", True, tags={"T004": JobTag("中")}),
+        MatchJob("0-pending", "待确认未评分", True),
+        MatchJob("C-rejected", "出差超出上限", True, tags={"T003": JobTag("频繁"), "T004": JobTag("高")}),
+    ]
+    assert [(item.job_id, item.hard_condition_status, item.score) for item in match_jobs(profile, candidates, dictionary)] == [
+        ("B-confirmed", "confirmed", 0.0), ("Z-confirmed", "confirmed", 0.0), ("A-confirmed", "confirmed", None),
+        ("A-pending", "pending_confirmation", 1.0), ("B-pending", "pending_confirmation", 0.5),
+        ("0-pending", "pending_confirmation", None),
+    ]
+
+
+# 比较有无资格信息时的候选与分值，同时核对 P008 和 P019 的参考提示。
 def test_qualification_hints_do_not_filter_or_rank(dataset):
     jobs, dictionary = dataset
     results = match_jobs(SC_REVISED, jobs.values(), dictionary)
@@ -189,6 +209,10 @@ def test_qualification_hints_do_not_filter_or_rank(dataset):
         "T020": ("reference_only", "文科优先", None),
     }
     p019 = next(hint for hint in by_id["P019"].qualification_hints if hint.tag_id == "T019")
-    assert p019.status == "preparation_needed" and (p019.current, p019.requirement) == ("群众", "中共党员")
+    assert (p019.status, p019.current, p019.requirement) == ("reference_only", "群众", "中共党员")
+    assert p019.detail == "岗位参考政治面貌要求为中共党员，当前为群众，存在资格条件差异，需以实际招聘公告为准"
+    same_status = replace(SC_REVISED, qualifications={**SC_REVISED.qualifications, "political_status": "中共党员"})
+    matched_p019, = match_jobs(same_status, [jobs["P019"]], dictionary)
+    assert next(hint.status for hint in matched_p019.qualification_hints if hint.tag_id == "T019") == "meets_requirement"
     empty_p008 = next(match for match in unqualified if match.job_id == "P008")
     assert next(hint.status for hint in empty_p008.qualification_hints if hint.tag_id == "T017") == "pending_confirmation"

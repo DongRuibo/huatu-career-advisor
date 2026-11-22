@@ -1,6 +1,6 @@
 # 确定性岗位匹配引擎，使用正式画像、岗位数据和标签字典生成候选与评分明细。
 # 先核对硬条件，再按已知软偏好评分，同时保留未知项和评分覆盖情况。
-# 报考相关条件单独生成未来准备提示，排序和理由由同一次规则计算得出。
+# 资格条件单独生成参考提示，排序和理由由同一次规则计算得出。
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -128,7 +128,7 @@ def soft_score(preference: Preference, job_value: str, definition: TagDefinition
     return max(0.0, 1.0 - distance * 0.5)
 
 
-# 对照岗位参考要求和用户已知资格，生成准备与待确认提示，供展示和报告引用。
+# 对照岗位参考要求和用户已知资格，生成资格提示，供展示和报告引用。
 def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHint]:
     education_order = ["本科", "硕士"]
     fields = (
@@ -166,7 +166,13 @@ def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHi
         elif tag_id == "T018":
             meets = cast(int, current) >= cast(int, requirement)
         else:
-            meets = current == requirement
+            if current != requirement:
+                hints.append(QualificationHint(
+                    tag_id, requirement, current, "reference_only",
+                    f"{requirement_text}，当前为{current}，存在资格条件差异，需以实际招聘公告为准",
+                ))
+                continue
+            meets = True
 
         status = "meets_requirement" if meets else "preparation_needed"
         description = "符合参考要求" if meets else "可作为长期准备方向"
@@ -178,7 +184,7 @@ def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHi
 def match_jobs(
     profile: Profile, jobs: Iterable[MatchJob], dictionary: Mapping[str, TagDefinition],
 ) -> list[MatchResult]:
-    # 资格字段留给后面的准备提示，避免把当前报考资格当作未来规划的硬条件。
+    # 资格字段留给后面的参考提示，避免把当前报考资格当作未来规划的硬条件。
     preferences = [
         (preference, dictionary[tag_id]) for tag_id, preference in sorted(profile.preferences.items())
         if dictionary[tag_id].match_rule != "资格参考"
@@ -260,8 +266,13 @@ def match_jobs(
             unknown_tags=unknown_hard + unknown_soft,
             qualification_hints=qualification_hints(profile, job),
         ))
-    # 无可评分项放在末尾，同分按岗位 ID 排序，便于复现结果。
-    return sorted(matches, key=lambda match: (match.score is None, -(match.score or 0.0), match.job_id))
+    # 硬条件已确认的岗位优先。同组按分数降序，零分也排在无分数之前，同分按岗位 ID 排序。
+    return sorted(matches, key=lambda match: (
+        match.hard_condition_status == "pending_confirmation",
+        match.score is None,
+        -(match.score or 0.0),
+        match.job_id,
+    ))
 
 
 # 组装会话画像、可匹配岗位和标签字典，将数据交给不访问数据库的匹配函数。
