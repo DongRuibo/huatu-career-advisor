@@ -1,3 +1,6 @@
+# 验证 Excel 的解析和清洗，覆盖原始模拟工作簿及构造的异常数据。
+# 检查表头映射、缺失 ID、非法枚举、重复合并、冲突版本选择和隔离。
+
 from collections import Counter
 from datetime import datetime
 
@@ -6,6 +9,7 @@ from openpyxl import load_workbook
 from app.etl import DEFAULT_WORKBOOK, load_import_data
 
 
+# 核对内置模拟 Excel 的岗位数、标签映射、知识资料和预期清洗问题。
 def test_supplied_workbook():
     data = load_import_data(DEFAULT_WORKBOOK)
 
@@ -35,6 +39,7 @@ def test_supplied_workbook():
     assert missing_tags == expected
 
 
+# 在临时工作簿中交换字段列并注入无效值，验证表头匹配和缺失 ID 的可重复生成。
 def test_bad_values_and_missing_job_id_follow_column_names(tmp_path):
     path = tmp_path / "无效值.xlsx"
     workbook = load_workbook(DEFAULT_WORKBOOK)
@@ -42,6 +47,7 @@ def test_bad_values_and_missing_job_id_follow_column_names(tmp_path):
     jobs["A2"] = " "
     jobs["D3"] = " 未知城市 "
     jobs["C4"] = "未知方向"
+    # 同时交换表头和值，验证解析按列名识别字段，即使工作表列顺序改变。
     for direction, city in jobs.iter_rows(min_col=3, max_col=4):
         direction.value, city.value = city.value, direction.value
     workbook["岗位标签"]["C19"] = "每天"
@@ -64,6 +70,7 @@ def test_bad_values_and_missing_job_id_follow_column_names(tmp_path):
     )
 
 
+# 分别验证有明确最新版本时采用新岗位、时间并列冲突时仅隔离该岗位及其关联资料。
 def test_conflict_uses_latest_or_quarantines_only_ambiguous_job(tmp_path):
     path = tmp_path / "冲突.xlsx"
     workbook = load_workbook(DEFAULT_WORKBOOK)

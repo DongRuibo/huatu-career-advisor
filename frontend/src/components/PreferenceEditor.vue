@@ -1,3 +1,7 @@
+<!--
+偏好编辑弹窗，将输入整理为标签所需的单值、多选或加班复合值。
+负责表单校验和错误提示，交由父组件调用偏好接口并刷新匹配。
+-->
 <script setup lang="ts">
 import { X } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -20,11 +24,14 @@ const value = ref('')
 const maximum = ref('')
 const saving = ref(false)
 const error = ref('')
-const listValue = computed(() => tag.value === 'T001' || tag.value === 'T002')
-const hardConstraint = computed<ConstraintType | null>(() => listValue.value ? 'in' : tag.value === 'T003' ? 'max' : null)
+// 按标签确定允许的硬条件约束，普通软偏好标签返回空值。
+const hardConstraint = computed<ConstraintType | null>(() => tag.value === 'T001' || tag.value === 'T002' ? 'in' : tag.value === 'T003' ? 'max' : null)
+const listValue = computed(() => hardConstraint.value === 'in' || tag.value === 'T012')
 
+// 选中标签后为表单加载该标签已保存的值和约束，或应用新建默认值。
 watch(tag, () => {
   const existing = props.preferences[tag.value]
+  // 编辑时加载已保存的强度与约束。新增时才根据标签设置起始值。
   strength.value = existing?.strength ?? (hardConstraint.value ? 'hard' : 'soft')
   constraint.value = existing?.constraint_type ?? hardConstraint.value ?? 'prefer'
   const current = existing?.value
@@ -32,21 +39,27 @@ watch(tag, () => {
   maximum.value = current && typeof current === 'object' && 'acceptable_max' in current ? current.acceptable_max : ''
   error.value = ''
 }, { immediate: true })
+// 切换为硬条件时将表单约束调整为该标签要求的类型。
 watch(strength, () => {
   if (strength.value === 'hard' && hardConstraint.value) constraint.value = hardConstraint.value
 })
 
+// 表单挂载后使用原生对话框显示偏好编辑界面。
 onMounted(() => dialog.value?.showModal())
 
+// 在没有保存请求进行时通知父组件关闭编辑弹窗。
 function close() {
   if (!saving.value) emit('close')
 }
 
+// 把表单值整理为接口支持的格式，保存成功后关闭弹窗，失败则显示错误并保留输入。
 async function save() {
   const cleaned = value.value.trim()
   const upper = maximum.value.trim()
-  const finalValue: EditableValue = listValue.value
-    ? cleaned.split(/[,，、\n]/u).map((entry) => entry.trim()).filter(Boolean)
+  // 地区和方向始终用数组。工作类型仍可保存单值，多个选项时用数组。
+  const choices = listValue.value ? cleaned.split(/[,，、\n]/u).map((entry) => entry.trim()).filter(Boolean) : null
+  const finalValue: EditableValue = choices
+    ? tag.value === 'T012' && choices.length === 1 ? choices[0] : choices
     : tag.value === 'T013' && upper ? { preferred: cleaned, acceptable_max: upper } : cleaned
   if (!cleaned || (Array.isArray(finalValue) && !finalValue.length)) {
     error.value = '请输入偏好值。'

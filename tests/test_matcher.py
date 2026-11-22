@@ -1,3 +1,6 @@
+# 直接构造画像与岗位数据测试确定性匹配规则。
+# 检查三组场景的候选基线、硬条件未知、评分覆盖、同分排序和资格提示。
+
 from dataclasses import fields, replace
 
 import pytest
@@ -8,6 +11,7 @@ from app.matcher import JobTag, MatchJob, ScoringCoverage, match_jobs
 from app.profile import Preference, PreferenceSuggestion, Profile
 
 
+# 从已清洗的模拟工作簿组装岗位和字典，给纯规则用例提供与系统一致的数据。
 @pytest.fixture(scope="module")
 def dataset():
     data = load_import_data(DEFAULT_WORKBOOK)
@@ -24,6 +28,7 @@ def dataset():
     return jobs, dictionary
 
 
+# 构造用于规则断言的正式偏好，省略本组测试无需追踪的证据字段。
 def preference(tag_id, value, strength="soft", constraint_type="prefer"):
     return Preference(tag_id, value, strength, constraint_type, None, None)
 
@@ -63,6 +68,7 @@ SA_CANDIDATES = {"P001", "P005", "P009", "P011", "P012", "P018"}
 EXPANDED_CANDIDATES = SA_CANDIDATES | {"P002", "P008", "P010", "P017", "P019"}
 
 
+# 逐组比较三种画像在各检查点的岗位 ID 集合，核对确认状态和不可匹配岗位。
 @pytest.mark.parametrize(("profile", "expected"), [
     (SA, SA_CANDIDATES),
     (SA_EXPANDED, EXPANDED_CANDIDATES),
@@ -81,6 +87,7 @@ def test_candidate_baselines(profile, expected, dataset):
     assert "P021" not in {match.job_id for match in result}
 
 
+# 逐项制造硬条件缺失并对照已知冲突的岗位，验证保留候选及待确认状态。
 @pytest.mark.parametrize("tag_id", ["T001", "T002", "T003"])
 def test_unknown_hard_condition_retains_candidate_but_is_not_a_match_reason(dataset, tag_id):
     jobs, dictionary = dataset
@@ -102,6 +109,7 @@ def test_unknown_hard_condition_retains_candidate_but_is_not_a_match_reason(data
     assert tag_id not in {reason.tag_id for reason in result.match_reasons}
 
 
+# 用 P012 与 P005 对照，验证未知项跳过平均而已知零分计入评分。
 def test_score_coverage_distinguishes_unknown_from_known_zero(dataset):
     jobs, dictionary = dataset
     results = {match.job_id: match for match in match_jobs(SA, jobs.values(), dictionary)}
@@ -117,6 +125,7 @@ def test_score_coverage_distinguishes_unknown_from_known_zero(dataset):
     assert [(item.tag_id, item.job_value, item.score) for item in known_zero.unmet_preferences] == [("T005", "少", 0.0)]
 
 
+# 核对加班区间评分，并对比间接建议确认前后的参与评分情况。
 def test_soft_overtime_and_tentative_suggestions(dataset):
     jobs, dictionary = dataset
     results = {match.job_id: match for match in match_jobs(SB, jobs.values(), dictionary)}
@@ -129,10 +138,12 @@ def test_soft_overtime_and_tentative_suggestions(dataset):
         "avoid": "办公室", "needs_confirmation": False,
     })}, pending_suggestions={"T012": SB.pending_suggestions["T012"]})
     office, hybrid = [next(item.score for item in match.soft_scores if item.tag_id == "T007")
+                      # 按岗位 ID 固定断言顺序，将办公室和混合办公的分值分别赋给预期变量。
                       for match in sorted(match_jobs(confirmed, [jobs["P001"], jobs["P009"]], dictionary), key=lambda item: item.job_id)]
     assert (office, hybrid) == (0.0, 1.0)
 
 
+# 为各类软偏好构造三个不同取值，核对分数并确认候选都保留。
 @pytest.mark.parametrize(("tag_id", "wanted", "kind", "values", "scores"), [
     ("T008", "中上", "prefer", ["中等", "中上", "较高"], [0.5, 1.0, 1.0]),
     ("T003", "偶尔", "max", ["无", "偶尔", "频繁"], [1.0, 1.0, 0.5]),
@@ -151,6 +162,7 @@ def test_soft_scoring_rules_keep_all_candidates(dataset, tag_id, wanted, kind, v
     assert [result[f"JOB{index}"].score for index in range(3)] == scores
 
 
+# 验证已知零分排在未知分之前，同分按岗位 ID 稳定排序。
 def test_unscored_candidates_follow_known_scores_and_same_score_orders_by_job_id(dataset):
     jobs, dictionary = dataset
     profile = Profile({"T004": preference("T004", "低")}, {}, [])
@@ -163,6 +175,7 @@ def test_unscored_candidates_follow_known_scores_and_same_score_orders_by_job_id
     assert all(item.score is None and item.scoring_coverage == ScoringCoverage(0, 0) for item in empty)
 
 
+# 比较填写和清空资格后的候选与分值，同时核对 P008 和 P019 的准备提示。
 def test_qualification_hints_do_not_filter_or_rank(dataset):
     jobs, dictionary = dataset
     results = match_jobs(SC_REVISED, jobs.values(), dictionary)

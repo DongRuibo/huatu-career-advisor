@@ -1,3 +1,7 @@
+# 岗位查询与维护层，提供条件筛选、岗位详情，以及新增和修改岗位。
+# 详情将主表字段、标签事实和知识资料合成一个响应，供接口查询和模型讲解使用。
+# 保存时校验标签字典，在同一事务内更新岗位字段和由字段派生的标签。
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
@@ -59,6 +63,7 @@ class JobDetails:
     documents: list[dict]
 
 
+# 使用调用方的连接读取岗位字段、标签和知识资料，找不到岗位时抛出领域错误。
 def read_job(conn: Connection, job_id: str) -> JobDetails:
     with conn.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
@@ -80,11 +85,13 @@ def read_job(conn: Connection, job_id: str) -> JobDetails:
     return JobDetails(job, tags, documents)
 
 
+# 为岗位详情查询建立连接，返回按岗位 ID 组装的完整资料。
 def get_job(job_id: str) -> JobDetails:
     with connect() as conn:
         return read_job(conn, job_id)
 
 
+# 组合城市、职业方向和一项标签的可选过滤条件，按岗位 ID 返回列表。
 def list_jobs(city: str | None, direction: str | None, tag: tuple[str, str] | None) -> list[dict]:
     conditions = []
     parameters = []
@@ -95,6 +102,7 @@ def list_jobs(city: str | None, direction: str | None, tag: tuple[str, str] | No
         conditions.append(sql.SQL("j.direction = %s"))
         parameters.append(direction)
     if tag is not None:
+        # 用 EXISTS 筛选标签，让列表保持一条岗位一行的结构。
         conditions.append(sql.SQL(
             "EXISTS (SELECT 1 FROM job_tags jt WHERE jt.job_id = j.job_id AND jt.tag_id = %s AND jt.value = %s)"
         ))
@@ -108,7 +116,9 @@ def list_jobs(city: str | None, direction: str | None, tag: tuple[str, str] | No
         return cursor.fetchall()
 
 
+# 创建或部分更新岗位，在同一事务内校验并同步派生标签，最终返回岗位详情。
 def save_job(job_id: str, update: JobUpdate, *, create: bool = False) -> JobDetails:
+    # 区分未提供和显式清空。省略标签时保留原值，空对象会清空业务标签。
     changes = update.model_dump(exclude_unset=True, exclude={"job_id", "tags"})
     replace_tags = "tags" in update.model_fields_set
     with connect() as conn:
@@ -117,6 +127,7 @@ def save_job(job_id: str, update: JobUpdate, *, create: bool = False) -> JobDeta
         if create:
             fields = {key: changes.get(key) for key in JobUpdate.model_fields if key != "tags"}
         else:
+            # 锁定岗位后再读取并合并字段，让并发修改按顺序处理。
             if conn.execute("SELECT 1 FROM jobs WHERE job_id = %s FOR UPDATE", (job_id,)).fetchone() is None:
                 raise JobNotFoundError("岗位不存在")
             previous = read_job(conn, job_id)
@@ -124,6 +135,7 @@ def save_job(job_id: str, update: JobUpdate, *, create: bool = False) -> JobDeta
             fields.update(changes)
             previous_tags = {tag["tag_id"]: tag for tag in previous.tags}
 
+        # 用合并后的岗位字段校验并同步派生标签，随后一并写入数据库。
         synchronized = []
         removed = []
         for tag_id, field in JOB_FIELD_TAGS.items():
@@ -158,6 +170,7 @@ def save_job(job_id: str, update: JobUpdate, *, create: bool = False) -> JobDeta
         else:
             upsert_rows(conn, "jobs", ("job_id",), [row])
 
+        # 整体替换只删除业务标签。派生标签按字段差异独立更新，值未变则保留已有依据。
         if replace_tags:
             removed.extend(WRITABLE_TAGS)
         if removed:

@@ -1,3 +1,6 @@
+// 工作台使用的 TypeScript 类型，描述请求体、FastAPI 响应与界面本地状态。
+// 区分正式偏好、待确认建议和资格。匹配类型保留后端得分、状态、依据和缺失项。
+
 export type Speaker = '家长' | '学生' | '咨询师'
 export interface Utterance { speaker: Speaker; text: string }
 export interface Session { session_id: string; mode: string }
@@ -55,6 +58,7 @@ export interface TurnResult {
   pending_suggestions: Suggestion[]
 }
 
+// 本地对话条目支持等待、成功和失败三种状态。只有成功态持有服务端的轮次结果。
 export type DialogueEntry = Utterance & { id: number; time: string } & (
   | { state: 'pending' }
   | { state: 'success'; result: TurnResult }
@@ -68,6 +72,7 @@ export interface SetPreference {
   constraint_type: ConstraintType
 }
 
+// 确认建议用原发言 ID 绑定来源，直接设置时则传入值、强度和约束。
 export type PreferenceUpdate = SetPreference | { action: 'confirm'; evidence_turn_id: number }
 
 export type HardStatus = 'confirmed' | 'pending_confirmation'
@@ -115,6 +120,43 @@ export interface FollowUpQuestion {
   known_jobs: number
   candidate_jobs: number
 }
+
+// 岗位管理的字段与接口一致，可空字段和业务标签分别提交。
+export interface JobFields {
+  name: string | null
+  city: string | null
+  direction: string | null
+  unit_type: string | null
+  unit_name: string | null
+  description: string | null
+  education_req: string | null
+  major_req: string | null
+  political_req: string | null
+  experience_years: number | null
+  remark: string | null
+  updated_at: string | null
+}
+
+export interface JobRecord extends JobFields {
+  job_id: string
+  is_matchable: boolean
+  created_at: string
+  modified_at: string
+}
+
+export interface JobTagInput {
+  value: string
+  evidence: string | null
+}
+
+export interface JobRecordDetail {
+  job: JobRecord
+  tags: (JobTagInput & { tag_id: string; name: string })[]
+  documents: { doc_id: string; doc_type: string; title: string; content: string; usage_limit: string | null }[]
+}
+
+export type JobWrite = Partial<JobFields> & { tags?: Record<string, JobTagInput> }
+export type JobFilters = Partial<Record<'city' | 'direction' | 'tag', string>>
 
 export interface ExplanationSection {
   text: string

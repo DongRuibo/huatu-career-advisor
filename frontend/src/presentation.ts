@@ -1,3 +1,6 @@
+// 界面展示转换层，集中提供标签、约束与资格状态的中文名称。
+// 用于格式化多选、加班复合值和得分，保留后端的实际匹配结果。
+
 import type { AssessmentStatus, ConstraintType, PreferenceValue, QualificationHint } from './types'
 
 export const tagLabels: Record<string, string> = {
@@ -22,10 +25,12 @@ export const qualificationStatus: Record<QualificationHint['status'], string> = 
   meets_requirement: '符合参考要求', preparation_needed: '可提前准备', pending_confirmation: '待确认', reference_only: '参考要求',
 }
 
+// 把标签 ID 转成中文名。未收录的标签回退到原 ID，便于查看后端数据。
 export function tagName(id: string): string {
   return tagLabels[id] ?? id
 }
 
+// 把标量、多选、复合值和待确认避开建议转为可读文字，必要时加上限或下限词。
 export function displayValue(value: PreferenceValue | null, constraint?: ConstraintType): string {
   if (value === null) return '未设置'
   if (Array.isArray(value)) return value.join('、')
@@ -37,6 +42,7 @@ export function displayValue(value: PreferenceValue | null, constraint?: Constra
   return value
 }
 
+// 将后端分值保留两位小数，空值单独显示为未评分。
 export function scoreText(score: number | null): string {
   return score === null ? '未评分' : score.toFixed(2)
 }

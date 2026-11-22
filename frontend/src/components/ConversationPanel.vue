@@ -1,3 +1,8 @@
+<!--
+咨询对话面板，负责发言草稿、角色选择、演示填入和发言时间线。
+通过父组件提交接口请求，只在成功后清空草稿并推进对应的演示轮次。
+时间线展示后端返回的标签变更和失败提示。
+-->
 <script setup lang="ts">
 import { ArrowDownToLine, ArrowUp, Check, LoaderCircle, MessageCircle, TriangleAlert } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -16,31 +21,39 @@ const speaker = ref<Speaker>('家长')
 const scenario = ref('')
 const step = ref(0)
 const history = ref<HTMLElement | null>(null)
+// 按所选演示场景取得预设发言序列。
 const sample = computed(() => scenarios[scenario.value]?.turns)
+// 根据演示进度取得下一条待填入的发言。
 const nextSample = computed(() => sample.value?.[step.value])
 
-watch(() => props.sessionId, () => {
+watch(/* 监听会话 ID */ () => props.sessionId, /* 会话切换时重置草稿、角色和演示进度 */ () => {
   draft.value = ''
   speaker.value = '家长'
   step.value = 0
 })
+// 更换场景时从所选场景的首轮起步。
 watch(scenario, () => { step.value = 0 })
-watch(() => props.entries.map((entry) => entry.state), async () => {
+watch(/* 以各条消息状态作为滚动触发条件 */ () => props.entries.map(/* 只提取提交状态 */ (entry) => entry.state), /* 等界面更新后滚到最新消息 */ async () => {
+  // 等新增或更新的消息渲染后再定位到底部，方便看到该轮结果。
   await nextTick()
   if (history.value) history.value.scrollTop = history.value.scrollHeight
 })
 
+// 将当前演示轮次的角色和原话填入输入框，保留用户主动提交的步骤。
 function fill() {
   if (!nextSample.value) return
+  // 只填入草稿与角色，保留让用户确认发言再提交的步骤。
   speaker.value = nextSample.value.speaker
   draft.value = nextSample.value.text
 }
 
+// 检查草稿后交给父级提交，成功时清空草稿，并在完成当前预设发言时推进演示轮次。
 async function send() {
   const turn = { text: draft.value.trim(), speaker: speaker.value }
   if (!turn.text || props.locked) return
   const fromSample = nextSample.value?.text === turn.text && nextSample.value?.speaker === turn.speaker
   if (await props.submit(turn)) {
+    // 只有成功提交当前预设原话才推进演示进度。提交失败或输入其他内容时保留该轮位置。
     if (fromSample) step.value++
     draft.value = ''
   }
@@ -52,7 +65,7 @@ async function send() {
     <header class="panel-header">
       <span class="section-icon"><MessageCircle :size="19" /></span>
       <div><h2 id="conversation-title">咨询对话</h2><p>按发言角色记录多轮咨询</p></div>
-      <span v-if="sessionId" class="pill header-extra">{{ entries.filter((item) => item.state === 'success').length }} 轮</span>
+      <span v-if="sessionId" class="pill header-extra">{{ entries.filter(/* 只统计已入库的发言 */ (item) => item.state === 'success').length }} 轮</span>
     </header>
     <div ref="history" class="conversation-history" role="log" aria-label="咨询记录">
       <div v-if="!entries.length" class="empty conversation-empty">

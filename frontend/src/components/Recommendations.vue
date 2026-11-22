@@ -1,3 +1,7 @@
+<!--
+岗位推荐区，呈现候选数量、得分、硬条件状态和评分覆盖。
+可打开岗位详情，并按用户操作生成智能追问，提示问题对应的画像版本。
+-->
 <script setup lang="ts">
 import { ArrowRight, BriefcaseBusiness, ChevronRight, LoaderCircle, MapPin, MessageCircleQuestion } from '@lucide/vue'
 import { ref } from 'vue'
@@ -20,8 +24,10 @@ const questionRevision = ref(-1)
 const asking = ref(false)
 const questionError = ref('')
 
+// 按当前会话请求下一步追问，记录生成时的画像版本并处理请求异常。
 async function ask() {
   if (!props.sessionId || props.locked || asking.value) return
+  // 记录发出请求时的画像版本，随后才能判断屏幕上的问题是否基于旧偏好。
   const revision = props.revision
   asking.value = true
   questionError.value = ''

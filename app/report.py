@@ -1,3 +1,7 @@
+# 将当前画像、候选岗位、待确认问题和下一步建议组合成职业规划报告。
+# 推荐清单沿用匹配引擎的排序。模型从程序提供的建议中选择，事实来源由代码控制。
+# 结构化报告可由接口直接序列化为 JSON，也可渲染为 Markdown。
+
 import json
 import logging
 from dataclasses import dataclass
@@ -51,6 +55,7 @@ class PlanningReport:
     advice: list[str]
 
 
+# 汇总会话画像、匹配清单、追问和可准备事项，返回两种报告格式共用的数据。
 def build_report(session_id: UUID, top_n: int, model: JsonModel | None = None) -> PlanningReport:
     profile = get_profile(session_id)
     matches = match_session(session_id)
@@ -63,27 +68,51 @@ def build_report(session_id: UUID, top_n: int, model: JsonModel | None = None) -
         item = NamedPreference(definition[preference.tag_id].name, preference)
         (hard if preference.strength == "hard" else soft).append(item)
 
+    # 推荐清单按请求数量截取，智能追问仍基于完整候选集计算区分度。
     recommended = matches[:top_n]
-    questions = follow_up_questions(profile, matches, model)
+    questions = follow_up_questions(profile, matches)
+    # 把入选岗位的未知项单列为核实事项，便于报告读者找到待确认资料。
     unknown = [
         ConfirmJobDetail(job.job_id, item.tag_id, item.detail)
         for job in recommended for item in job.hard_conditions + job.soft_scores
         if item.status == "pending_confirmation"
     ]
 
+    # 用当前候选和待确认事项生成具体行动，模型只选择和排序已有文案。
     options = {}
+    priority_jobs = [
+        job.job_id for job in recommended
+        if job.hard_condition_status == "confirmed"
+        and all(hint.status != "preparation_needed" for hint in job.qualification_hints)
+    ][:3]
+    if recommended:
+        focus = f"先对比 {'、'.join(priority_jobs)}" if priority_jobs else "从推荐清单中选出最感兴趣的岗位"
+        options["compare"] = f"{focus}，了解工作内容、工作方式和成长方向，再按学生最看重的方面缩小范围。"
+        if unknown or any(hint.status == "pending_confirmation" for job in recommended for hint in job.qualification_hints):
+            options["compare"] += "把清单中的待确认信息列出来，逐项核实。"
+    else:
+        options["review"] = "和学生逐项确认哪些条件必须满足。如果有可以放宽的条件，调整后再比较候选岗位。"
+
+    # 按资格类型合并准备事项，让同一条建议能覆盖多个岗位及其不同差距。
+    qualification_jobs: dict[str, list[str]] = {}
     for job in recommended:
         for hint in job.qualification_hints:
             if hint.status == "preparation_needed":
-                options[f"qualification:{job.job_id}:{hint.tag_id}"] = f"将 {job.job_id} 的资格差距纳入准备计划。{hint.detail}。"
-    for item in unknown:
-        options[f"verify:{item.job_id}:{item.tag_id}"] = f"联系咨询师核实 {item.job_id} 的{definition[item.tag_id].name}。"
-    for question in questions:
-        options[f"clarify:{question.tag_id}"] = f"与学生进一步确认对{question.tag_name}的偏好。"
-    if recommended:
-        options["compare"] = "对照推荐岗位的匹配依据和未满足项，列出愿意优先了解的岗位。"
-    else:
-        options["review"] = "与学生复核已明确的硬条件，确认是否愿意扩大职业探索范围。"
+                qualification_jobs.setdefault(hint.tag_id, []).append(job.job_id)
+    preparation = []
+    for tag_id, job_ids in qualification_jobs.items():
+        group = "、".join(job_ids[:3])
+        if len(job_ids) > 3:
+            group += f" 等 {len(job_ids)} 个岗位"
+        if tag_id == "T018":
+            preparation.append(f"关注 {group} 时，先核实哪些经历可计入工作经验，再据此安排实习或项目实践，并保存经历证明。")
+        else:
+            name = definition[tag_id].name
+            preparation.append(f"核实 {group} 的{name}，再据此更新长期准备清单。")
+    if preparation:
+        options["qualification"] = "".join(preparation)
+    if questions or profile.pending_suggestions:
+        options["clarify"] = "请学生回答上面的偏好问题，选出最看重的一项，再用这个偏好区分候选岗位。"
     options = {key: value for key, value in options.items() if not PROHIBITED_CLAIMS.search(value)}
 
     selected = []
@@ -93,10 +122,8 @@ def build_report(session_id: UUID, top_n: int, model: JsonModel | None = None) -
         selected = list(dict.fromkeys(step for step in draft.step_ids if step in options))
     except (httpx.HTTPError, ValueError, KeyError):
         logger.warning("规划模型未返回有效结果，使用资料支持的准备建议")
-    qualification_step = next((key for key in options if key.startswith("qualification:")), None)
-    if qualification_step and not any(key.startswith("qualification:") for key in selected):
-        selected.insert(0, qualification_step)
-    selected = list(dict.fromkeys([*selected, *options]))[:3]
+    # 最多三类行动，保留模型顺序并补全其余类别。模型失败时沿用规则顺序。
+    selected = list(dict.fromkeys([*selected, *options]))
 
     return PlanningReport(
         session_id=session_id, mode="future_planning", hard_preferences=hard, soft_preferences=soft,
@@ -107,54 +134,74 @@ def build_report(session_id: UUID, top_n: int, model: JsonModel | None = None) -
     )
 
 
+# 用普通读者能直接使用的语言呈现当前画像和岗位依据。审计字段由 JSON 返回。
 def render_markdown(report: PlanningReport) -> str:
-    lines = ["# 职业规划报告", "", "本报告用于未来职业意向咨询。", ""]
-    for title, items in (("硬条件", report.hard_preferences), ("软偏好", report.soft_preferences)):
-        lines += [f"## {title}", ""]
+    lines = ["# 职业规划报告", "", "本报告用于职业规划参考，实际岗位要求以招聘信息为准。", "",
+             "## 职业意向概览", ""]
+    for title, items in (("必须满足的条件", report.hard_preferences), ("更看重的特点", report.soft_preferences)):
+        preferences = []
         for item in items:
-            raw = item.preference.evidence_text
-            evidence = " ".join(raw.splitlines()) if raw else "手动设置"
-            value = json.dumps(item.preference.value, ensure_ascii=False)
-            lines.append(f"- {item.name}（{item.preference.tag_id}） · {value} · 依据「{evidence}」")
-        if not items:
-            lines.append("尚未明确。")
-        lines.append("")
+            value = item.preference.value
+            if isinstance(value, list):
+                description = "、".join(value)
+            elif isinstance(value, dict):
+                description = (f"希望避开{value['avoid']}" if "avoid" in value
+                               else f"偏好为{value['preferred']}，最多接受{value['acceptable_max']}")
+            else:
+                prefix = {"max": "最多接受", "min": "至少"}.get(item.preference.constraint_type, "")
+                description = f"{prefix if value != '无' else ''}{value}"
+            preferences.append(f"{item.name}（{description}）")
+        lines.append(f"- **{title}** · {('，'.join(preferences) or '尚未明确')}。")
 
-    lines += ["## 当前资格与修正记录", ""]
-    for field, name in (("education", "学历"), ("political_status", "政治面貌"), ("experience_years", "工作经验（年）")):
-        if field in report.qualifications:
-            lines.append(f"- {name} · {report.qualifications[field]}")
-    if not report.qualifications:
-        lines.append("当前资格尚未提供。")
-    for change in report.preference_changes:
-        turn = f"第 {change.turn_no} 轮" if change.turn_no is not None else "手动修改"
-        previous = json.dumps(change.old_value, ensure_ascii=False)
-        latest = json.dumps(change.new_value, ensure_ascii=False)
-        lines.append(f"- {turn} · {change.tag_id} · {previous} → {latest} · 「{' '.join(change.reason.splitlines())}」")
+    qualifications = [
+        f"{name}{report.qualifications[field]}{suffix}"
+        for field, name, suffix in (("education", "学历", ""), ("political_status", "政治面貌", ""),
+                                    ("experience_years", "工作经验", "年"))
+        if field in report.qualifications
+    ]
+    lines.append(f"- **当前情况** · {('，'.join(qualifications) or '尚未提供学历、政治面貌及工作经验')}。")
 
-    lines += ["", "## 推荐岗位", "", f"共 {report.candidate_count} 个候选，列出其中 {len(report.recommended_jobs)} 个。", ""]
+    lines += ["", "## 岗位匹配概况", ""]
+    if report.recommended_jobs:
+        lines.append(f"共找到 {report.candidate_count} 个候选岗位，以下展示 {len(report.recommended_jobs)} 个。")
+    else:
+        lines.append("当前条件下暂无候选岗位。")
+    scored_counts = {job.scoring_coverage.scored_preferences for job in report.recommended_jobs if job.score is not None}
+    if scored_counts:
+        scope = ("每个已评分岗位只有 1 项已知软偏好参与评分" if scored_counts == {1}
+                 else "岗位只按有资料的软偏好评分")
+        lines += ["", f"{scope}。1.00 表示参与评分的偏好均得到满足。"
+                  "评估岗位整体适合度还需结合更多信息，录用以实际招聘结果为准。"]
+    elif report.recommended_jobs:
+        lines += ["", "当前暂无可用于评分的软偏好资料。"]
+
+    if report.recommended_jobs:
+        lines += ["", "## 推荐岗位", "", "| 岗位 | 主要匹配依据 | 需留意 |", "| --- | --- | --- |"]
     for job in report.recommended_jobs:
-        score = f"{job.score:.2f}" if job.score is not None else "暂无评分"
-        status = "存在待确认硬条件" if job.hard_condition_status == "pending_confirmation" else (
-            "已知硬条件均满足" if job.hard_conditions else "暂未设置硬条件"
-        )
-        lines += [f"### {job.job_id} {job.name or '岗位名称未提供'}", "",
-                  f"得分 {score} · {status} · 评分覆盖 {job.scoring_coverage.scored_preferences} 项，"
-                  f"未知 {job.scoring_coverage.unknown_preferences} 项。", ""]
-        for reason in job.match_reasons:
-            evidence = f"（依据：{reason.evidence}）" if reason.evidence else ""
-            lines.append(f"- {reason.detail}{evidence}")
-        lines.extend(f"- 未满足 · {item.detail}" for item in job.unmet_preferences)
-        lines.extend(f"- 待确认 · {item.message}" for item in report.job_details_to_confirm if item.job_id == job.job_id)
-        lines.extend(f"- 资格参考 · {hint.detail}" for hint in job.qualification_hints)
-        lines.append("")
+        reasons = [
+            f"{item.tag_name}为{item.job_value}" + ("（部分符合偏好）" if item.status == "partially_matched" else "")
+            for item in job.match_reasons
+        ]
+        cautions = [item.message for item in report.job_details_to_confirm if item.job_id == job.job_id]
+        cautions.extend(item.detail for item in job.unmet_preferences)
+        hints = [hint.detail for hint in job.qualification_hints if hint.status != "meets_requirement"]
+        if not hints:
+            hints = [hint.detail for hint in job.qualification_hints]
+        if hints:
+            cautions.append(f"资格参考：{'。'.join(hints)}")
+        cells = (f"{job.job_id} {job.name or '岗位名称未提供'}", "，".join(reasons) or "暂无已确认的匹配依据",
+                 "。".join(cautions) or "—")
+        lines.append("| " + " | ".join(" ".join(cell.splitlines()).replace("|", r"\|") for cell in cells) + " |")
 
-    lines += ["## 待确认问题", ""]
-    lines.extend(f"- {item.text}" for item in report.questions)
-    lines.extend(f"- {item.tag_id} 待确认建议 · 避开「{item.value['avoid']}」 · 原话「{item.evidence_text}」"
-                 for item in report.pending_suggestions)
-    if not report.questions and not report.pending_suggestions and not report.job_details_to_confirm:
-        lines.append("暂无待确认问题。")
+    lines += ["", "## 待确认问题", ""]
+    questions = [item.text for item in report.questions]
+    asked_tags = {item.tag_id for item in report.questions}
+    questions.extend(f"你是否希望避开「{item.value['avoid']}」这类岗位？"
+                     for item in report.pending_suggestions if item.tag_id not in asked_tags)
+    if questions:
+        lines.extend(f"- {question}" for question in questions)
+    else:
+        lines.append("暂无需要补充的职业偏好问题。")
     lines += ["", "## 职业规划建议", ""]
-    lines.extend(f"- {step}" for step in report.advice)
+    lines.extend(f"{number}. {step}" for number, step in enumerate(report.advice, start=1))
     return "\n".join(lines) + "\n"

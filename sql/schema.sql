@@ -1,3 +1,7 @@
+-- PostgreSQL 建表和升级脚本，覆盖岗位资料、标签字典、咨询画像和导入记录。
+-- 主键、外键、唯一约束和索引支持岗位维护、会话追溯与条件筛选。
+-- 脚本可重复执行，并兼容把旧版画像中的待确认建议迁移到独立表。
+
 CREATE TABLE IF NOT EXISTS jobs (
     job_id text PRIMARY KEY,
     name text,
@@ -30,6 +34,7 @@ CREATE TABLE IF NOT EXISTS tag_definitions (
     unknown_rule text NOT NULL
 );
 
+-- 字典定义标签规则，关联表保存各岗位的实际标签值和事实依据。
 CREATE TABLE IF NOT EXISTS job_tags (
     job_id text REFERENCES jobs (job_id),
     tag_id text REFERENCES tag_definitions (tag_id),
@@ -53,6 +58,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- id 用于证据外键，turn_no 是会话内展示的顺序，同一会话中不能重复。
 CREATE TABLE IF NOT EXISTS dialogue_turns (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES sessions (session_id),
@@ -63,6 +69,7 @@ CREATE TABLE IF NOT EXISTS dialogue_turns (
     UNIQUE (session_id, turn_no)
 );
 
+-- 每个会话每种标签只保留一份正式偏好，用 JSONB 表示单值、多选和复合值。
 CREATE TABLE IF NOT EXISTS user_preferences (
     session_id uuid REFERENCES sessions (session_id),
     tag_id text REFERENCES tag_definitions (tag_id),
@@ -74,6 +81,7 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     PRIMARY KEY (session_id, tag_id)
 );
 
+-- 待确认建议单独存放，避免匹配引擎提前使用间接推断。
 CREATE TABLE IF NOT EXISTS preference_suggestions (
     session_id uuid REFERENCES sessions (session_id),
     tag_id text REFERENCES tag_definitions (tag_id),
@@ -93,6 +101,7 @@ INSERT INTO preference_suggestions (session_id, tag_id, value, evidence_turn_id,
 SELECT session_id, tag_id, value, evidence_turn_id, evidence_text FROM pending
 ON CONFLICT (session_id, tag_id) DO NOTHING;
 
+-- 当前值留在正式画像表。新增、替换和撤销由历史表记录前后取值与依据。
 CREATE TABLE IF NOT EXISTS preference_changes (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES sessions (session_id),
@@ -111,6 +120,7 @@ CREATE TABLE IF NOT EXISTS user_qualifications (
     experience_years integer
 );
 
+-- 批次与异常分开记录，零异常的导入也能按批次查询。
 CREATE TABLE IF NOT EXISTS import_runs (
     run_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     total_rows integer NOT NULL,

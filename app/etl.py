@@ -1,3 +1,7 @@
+# 模拟 Excel 的解析、清洗和导入入口，读取岗位、标签字典、岗位标签和知识资料。
+# 先校验表头与取值，合并重复版本并隔离无解冲突，再同步岗位和派生标签。
+# 数据库事务同时保存业务记录和导入批次，可按批次追溯缺字段、无效取值和缺失标签。
+
 import argparse
 import json
 from collections import Counter, defaultdict
@@ -30,6 +34,7 @@ JOB_COLUMNS = {
 }
 JOB_HEADERS = {field: header for header, field in JOB_COLUMNS.items()}
 KEY_FIELDS = ("job_id", "name", "city", "direction")
+# 这些标签以岗位主表字段为准，导入和岗位编辑共用这份映射。
 JOB_FIELD_TAGS = {
     "T001": "city",
     "T002": "direction",
@@ -92,6 +97,7 @@ class ImportData:
     issues: list[ImportIssue]
 
 
+# 按指定工作表和表头读取原始行，校验列名，将空白归为缺失并记录需要追溯的清洗问题。
 def read_rows(
     workbook: pd.ExcelFile,
     sheet: str,
@@ -99,6 +105,7 @@ def read_rows(
     columns: dict[str, str],
     issues: list[ImportIssue],
 ) -> list[tuple[int, ExcelRow]]:
+    # 先按原始文本读取，保留工作表行号，便于定位异常来源。
     frame = pd.read_excel(workbook, sheet_name=sheet, header=header_row - 1, dtype=str, na_filter=False)
     frame.columns = frame.columns.str.strip()
     missing = columns.keys() - set(frame.columns)
@@ -122,7 +129,9 @@ def read_rows(
     return rows
 
 
+# 验证工作簿字典中的标签、基数、允许值和规则，生成导入与匹配共用的字典。
 def read_definitions(rows: list[tuple[int, ExcelRow]]) -> dict[str, dict]:
+    # 字典不完整时中止导入。匹配依赖允许值及其顺序，无法用默认值补出这些规则。
     definitions = {}
     for row_number, row in rows:
         tag_id = row["tag_id"]
@@ -147,6 +156,7 @@ def read_definitions(rows: list[tuple[int, ExcelRow]]) -> dict[str, dict]:
     return definitions
 
 
+# 按岗位 ID 合并源行，解析时间并校验枚举，返回有效岗位、派生标签和存在未解决冲突的岗位 ID。
 def clean_jobs(
     rows: list[tuple[int, ExcelRow]],
     definitions: dict[str, dict],
@@ -156,6 +166,7 @@ def clean_jobs(
     for row_number, row in rows:
         job_id = row["job_id"]
         if job_id is None:
+            # 缺失 ID 的行仍可追溯。同一工作簿重导时会生成相同的内部 ID。
             payload = json.dumps(row, ensure_ascii=False, sort_keys=True).encode("utf-8")
             job_id = f"__missing_id__:{row_number}:{sha256(payload).hexdigest()[:16]}"
 
@@ -177,6 +188,7 @@ def clean_jobs(
         row_number, row, updated_at = newest[0]
 
         if len(history) > 1:
+            # 更新时间用于选版本，只有其他字段发生变化才算内容冲突。
             differing = [
                 field for field in row if field != "updated_at"
                 and any(candidate[field] != row[field] for _, candidate, _ in history)
@@ -194,6 +206,7 @@ def clean_jobs(
                         f"第 {number} 行={candidate[field]!r}" for number, candidate, _ in history
                     ) + "）" for field in fields
                 )
+                # 日期缺失或最新版本彼此冲突时，隔离该岗位并继续处理其他岗位。
                 if any(date is None for _, _, date in history) or any(
                     candidate[field] != row[field] for _, candidate, _ in newest for field in differing
                 ):
@@ -211,6 +224,7 @@ def clean_jobs(
                 f"岗位原始数据第 {row_number} 行缺少：{'、'.join(missing)}",
             ))
 
+        # 数据属性用于辨别源行是否重复。入库字段按岗位表保留，枚举无效值转为空。
         job = {field: value for field, value in row.items() if field != "data_attribute"}
         for tag_id, field in JOB_FIELD_TAGS.items():
             value = job[field]
@@ -228,6 +242,7 @@ def clean_jobs(
                 "evidence": f"岗位原始数据第 {row_number} 行「{JOB_HEADERS[field]}」：{value}",
             }
 
+        # 已通过字典校验的经验值转为整数。缺关键字段的岗位仍留档供维护接口查询。
         experience_years = job["experience_years"]
         jobs[job_id] = {
             **job,
@@ -239,6 +254,7 @@ def clean_jobs(
     return jobs, tags, unresolved
 
 
+# 解析 Excel 并整理岗位、标签和知识资料，同时收集异常。产出的中间数据可独立验证，无需数据库。
 def load_import_data(path: Path) -> ImportData:
     issues: list[ImportIssue] = []
     with pd.ExcelFile(path, engine="openpyxl") as workbook:
@@ -252,6 +268,7 @@ def load_import_data(path: Path) -> ImportData:
         job_id, tag_id, value = row["job_id"], row["tag_id"], row["value"]
         if job_id in unresolved:
             continue
+        # 标签表只补充业务标签，城市、方向和资格标签由岗位字段派生。
         if job_id not in jobs or tag_id not in definitions or tag_id in JOB_FIELD_TAGS:
             issues.append(ImportIssue(
                 job_id, "INVALID_VALUE",
@@ -267,6 +284,7 @@ def load_import_data(path: Path) -> ImportData:
             continue
         tags[job_id, tag_id] = row
 
+    # 缺标签只记导入异常，留给匹配层按未知处理。
     for job_id in jobs:
         for tag_id in definitions:
             if (job_id, tag_id) not in tags:
@@ -284,11 +302,14 @@ def load_import_data(path: Path) -> ImportData:
                 job_id, "INVALID_VALUE", f"知识库资料第 {row_number} 行缺少有效关联或必填字段",
             ))
             continue
+        # 通用资料保留正文，以空岗位 ID 表示面向所有岗位的资料。
         documents.append({**row, "job_id": None if job_id == "ALL" else job_id})
     return ImportData(len(job_rows), jobs, definitions, tags, documents, unresolved, issues)
 
 
+# 按批次 ID 或最近时间查询导入结果，并汇总各类异常及其明细。找不到批次时返回空值。
 def get_import_report(conn: Connection, run_id: UUID | None = None) -> dict | None:
+    # 先定位批次再查问题。由批次是否存在决定返回空问题列表还是未找到。
     with conn.cursor(row_factory=dict_row) as cursor:
         if run_id is None:
             cursor.execute("SELECT * FROM import_runs ORDER BY created_at DESC, run_id DESC LIMIT 1")
@@ -306,12 +327,15 @@ def get_import_report(conn: Connection, run_id: UUID | None = None) -> dict | No
     return {**run, "issue_counts": dict(Counter(issue["issue_type"] for issue in issues)), "issues": issues}
 
 
+# 读取清洗结果后在一个事务内同步业务数据、处理冲突并记下本次导入报告。
 def import_workbook(path: Path = DEFAULT_WORKBOOK) -> dict:
     data = load_import_data(path)
+    # 岗位、标签、资料和批次报告在同一事务内提交。
     with connect() as conn:
         upsert_rows(conn, "tag_definitions", ("tag_id",), list(data.definitions.values()))
         upsert_rows(conn, "jobs", ("job_id",), list(data.jobs.values()))
         if data.unresolved_job_ids:
+            # 已在库的冲突岗位也暂停匹配，防止旧版本继续参与推荐。
             conn.execute(
                 "UPDATE jobs SET is_matchable = false, modified_at = now() "
                 "WHERE is_matchable AND job_id = ANY(%s)",
@@ -342,6 +366,7 @@ def import_workbook(path: Path = DEFAULT_WORKBOOK) -> dict:
     return report
 
 
+# 接收可选工作簿路径，调用导入流程并将该批次结果以 JSON 打印到终端。
 def main() -> None:
     parser = argparse.ArgumentParser(description="清洗并导入岗位 Excel，输出本批导入报告")
     parser.add_argument("workbook", type=Path, nargs="?", default=DEFAULT_WORKBOOK)

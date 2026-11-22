@@ -1,3 +1,7 @@
+# 命令行端到端演示，读取工作簿中的 S-A、S-B、S-C 模拟发言。
+# 每个场景创建独立会话，按顺序提交发言，验证候选基线、讲解、追问和报告。
+# 可请求实际启动的 FastAPI，也可由集成测试传入进程内 HTTP 客户端。
+
 import argparse
 import asyncio
 import json
@@ -8,16 +12,19 @@ import httpx
 from openpyxl import load_workbook
 
 WORKBOOK = Path(__file__).resolve().parents[1] / "data" / "测试数据.xlsx"
+# 每个场景记录检查轮次、该轮候选数和最终候选数。
 EXPECTED_COUNTS = {"S-A": (4, 6, 11), "S-B": (4, 17, 17), "S-C": (3, 4, 11)}
 EXPLAIN_JOBS = {"S-A": "P012", "S-B": "P009", "S-C": "P008"}
 
 
+# 统一发送演示中的 HTTP 请求，状态异常时立即停止并保留报错信息。
 async def request(client: httpx.AsyncClient, method: str, path: str, **kwargs) -> httpx.Response:
     response = await client.request(method, path, **kwargs)
     response.raise_for_status()
     return response
 
 
+# 为每组示例建独立会话，逐轮调用接口、核对考核基线并收集展示摘要。
 async def run_scenarios(client: httpx.AsyncClient) -> dict:
     workbook = load_workbook(WORKBOOK, read_only=True, data_only=True)
     try:
@@ -26,6 +33,7 @@ async def run_scenarios(client: httpx.AsyncClient) -> dict:
             scenes[scene].append({"speaker": speaker, "text": text})
     finally:
         workbook.close()
+    # 补上基线要求的最后一句，用于验证扩大城市意向后会重新匹配。
     scenes["S-A"].append({"speaker": "家长", "text": "重庆也可以考虑"})
 
     summaries = {}
@@ -86,6 +94,7 @@ async def run_scenarios(client: httpx.AsyncClient) -> dict:
     return summaries
 
 
+# 通过指定的服务地址运行完整演示，向终端输出可复查的 JSON 结果。
 async def run_demo(base_url: str) -> None:
     async with httpx.AsyncClient(base_url=base_url, timeout=150.0) as client:
         print(json.dumps(await run_scenarios(client), ensure_ascii=False, indent=2))

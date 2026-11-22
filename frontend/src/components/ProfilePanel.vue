@@ -1,3 +1,7 @@
+<!--
+画像面板，展示当前硬条件、软偏好、原话依据、资格和待确认建议。
+手动编辑由父组件打开表单，确认建议时携带原发言数据库 ID。
+-->
 <script setup lang="ts">
 import { CirclePlus, LoaderCircle, Pencil, UserRound } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
@@ -14,23 +18,29 @@ const props = defineProps<{
   update: (tagId: string, update: PreferenceUpdate) => Promise<boolean>
 }>()
 const emit = defineEmits<{ edit: [tagId?: string]; refresh: [] }>()
+// 从已生效偏好按强度生成硬条件和软偏好两组。
 const groups = computed(() => {
   const active = Object.values(props.profile?.preferences ?? {})
   return [
+    // 筛出用于过滤的硬条件。
     { id: 'hard', title: '硬条件', items: active.filter((item) => item.strength === 'hard') },
+    // 筛出用于评分的软偏好。
     { id: 'soft', title: '软偏好', items: active.filter((item) => item.strength === 'soft') },
   ]
 })
+// 把后端按标签索引的待确认建议转换为可遍历的列表。
 const suggestions = computed(() => Object.values(props.profile?.pending_suggestions ?? {}))
 const confirmError = ref('')
 const confirming = ref('')
-watch(() => props.sessionId, () => { confirmError.value = '' })
+watch(/* 观察当前会话 ID */ () => props.sessionId, /* 切换会话后清除旧的确认错误 */ () => { confirmError.value = '' })
 
+// 携带建议对应的原话 ID 发起显式确认，并显示该建议的请求结果。
 async function confirm(suggestion: Suggestion) {
   if (suggestion.evidence_turn_id === null || props.locked) return
   confirmError.value = ''
   confirming.value = suggestion.tag_id
   try {
+    // 使用建议原有的证据 ID，后端据此核对会话和建议状态。
     await props.update(suggestion.tag_id, { action: 'confirm', evidence_turn_id: suggestion.evidence_turn_id })
   } catch (error) {
     confirmError.value = messageFor(error)

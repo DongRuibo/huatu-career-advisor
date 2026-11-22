@@ -1,5 +1,9 @@
+<!--
+岗位详情抽屉，把硬条件、软偏好、匹配理由和资格差距组织为可读明细。
+点击生成讲解后展示正文、缺失资料与回退状态，各段引用可单独展开核对。
+-->
 <script setup lang="ts">
-import { BriefcaseBusiness, LoaderCircle, MapPin, Sparkles, X } from '@lucide/vue'
+import { BriefcaseBusiness, ChevronRight, LoaderCircle, MapPin, Sparkles, X } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { api, messageFor } from '../api'
 import { displayValue, qualificationStatus, scoreText, statusLabels, tagName } from '../presentation'
@@ -12,20 +16,25 @@ const tab = ref<'match' | 'explain'>('match')
 const explanation = ref<JobExplanation | null>(null)
 const loading = ref(false)
 const error = ref('')
+// 把后端讲解拆成概况、职责、工作方式和资格四段供模板循环展示。
 const sections = computed(() => explanation.value ? [
   { title: '岗位概况', data: explanation.value.overview },
   { title: '主要职责', data: explanation.value.responsibilities },
   { title: '工作方式', data: explanation.value.work_style },
   { title: '资格准备', data: explanation.value.qualifications },
 ] : [])
+// 按硬条件和软偏好组织岗位评估明细。
 const assessments = computed(() => [
   { title: '硬条件', items: props.job.hard_conditions },
   { title: '软偏好评分明细', items: props.job.soft_scores },
 ])
 
+// 组件挂载并获得原生弹窗节点后打开岗位详情。
 onMounted(() => dialog.value?.showModal())
 
+// 为选中的岗位请求讲解，独立管理加载状态和错误提示。
 async function explain() {
+  // 匹配明细随岗位数据打开，生成讲解需用户单独触发。
   if (loading.value) return
   loading.value = true
   error.value = ''
@@ -92,13 +101,25 @@ async function explain() {
 
       <div v-else class="detail-content" :aria-busy="loading">
         <div class="explain-toolbar">
-          <div><h3>AI 岗位讲解</h3><p>{{ explanation ? explanation.generated_by === 'llm' ? '基于岗位资料生成' : '使用资料摘录回退' : '查看岗位职责、工作方式、资格与引用资料。' }}</p></div>
+          <div><h3>AI 岗位讲解</h3><p>{{ explanation ? explanation.generated_by === 'llm' ? '基于岗位资料生成' : '根据岗位资料整理' : '查看岗位职责、工作方式、资格与引用资料。' }}</p></div>
           <button class="button button-primary" type="button" :disabled="loading" @click="explain"><LoaderCircle v-if="loading" class="spin" :size="16" /><Sparkles v-else :size="16" />{{ loading ? '正在生成' : explanation ? '重新生成' : '生成岗位讲解' }}</button>
         </div>
         <p v-if="error" class="notice notice-error" role="alert">{{ error }}</p>
         <section v-for="section in sections" :key="section.title" class="detail-section">
-          <h3>{{ section.title }}</h3><p>{{ section.data.text }}</p>
-          <div v-for="source in section.data.evidence" :key="source.source_id + source.quote" class="source-quote"><strong>{{ source.source_id }}</strong><blockquote>{{ source.quote }}</blockquote></div>
+          <h3>{{ section.title }}</h3>
+          <p>{{ section.data.text }}</p>
+          <details v-if="section.data.evidence.length" class="source-details">
+            <summary class="source-toggle">
+              <ChevronRight class="source-chevron" :size="14" aria-hidden="true" />
+              <span class="source-expand">查看来源</span>
+              <span class="source-collapse">收起来源</span>
+              <span class="source-count">{{ section.data.evidence.length }} 条</span>
+            </summary>
+            <div v-for="source in section.data.evidence" :key="source.source_id + source.quote" class="source-quote">
+              <strong>{{ source.source_id }}</strong>
+              <blockquote>{{ source.quote }}</blockquote>
+            </div>
+          </details>
         </section>
         <section v-if="explanation?.missing_information.length" class="detail-section">
           <h3>资料未提供</h3><ul class="detail-list"><li v-for="item in explanation.missing_information" :key="item">{{ item }}</li></ul>

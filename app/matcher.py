@@ -1,3 +1,7 @@
+# 确定性岗位匹配引擎，使用正式画像、岗位数据和标签字典生成候选与评分明细。
+# 先核对硬条件，再按已知软偏好评分，同时保留未知项和评分覆盖情况。
+# 报考相关条件单独生成未来准备提示，排序和理由由同一次规则计算得出。
+
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from statistics import mean
@@ -80,7 +84,9 @@ class MatchResult:
     qualification_hints: list[QualificationHint]
 
 
+# 读取某个岗位的标签事实，城市和方向以主表为准。没有有效取值时返回空值。
 def job_fact(job: MatchJob, definition: TagDefinition) -> JobTag | None:
+    # 城市和方向以岗位字段为准。其余取值须通过字典校验才用于筛选或评分。
     tag = job.tags.get(definition.tag_id)
     if definition.tag_id == "T001" and (tag is None or tag.value != job.city):
         tag = JobTag(job.city, f"岗位资料的工作城市：{job.city}") if job.city is not None else None
@@ -89,8 +95,10 @@ def job_fact(job: MatchJob, definition: TagDefinition) -> JobTag | None:
     return tag if tag is not None and tag.value in definition.allowed_values else None
 
 
+# 对已知岗位值计算一项软偏好的 0 到 1 分，支持多选、避开偏好和有序量级。
 def soft_score(preference: Preference, job_value: str, definition: TagDefinition) -> float:
     value = preference.value
+    # 多选和避开偏好按命中打分，有序标签按字典量级差距降分。
     if isinstance(value, list):
         return float(job_value in value)
     if isinstance(value, dict) and "avoid" in value:
@@ -101,6 +109,7 @@ def soft_score(preference: Preference, job_value: str, definition: TagDefinition
     order = definition.allowed_values
     position = order.index(job_value)
     if isinstance(value, dict):
+        # 加班超出可接受上限时给零分，仍由软偏好决定排序。
         if position > order.index(value["acceptable_max"]):
             return 0.0
         distance = abs(position - order.index(value["preferred"]))
@@ -115,9 +124,11 @@ def soft_score(preference: Preference, job_value: str, definition: TagDefinition
             distance = max(0, -difference)
         else:
             distance = abs(difference)
+    # 相差一个量级扣半分，最低为零，避免用负分改变已知项平均值的含义。
     return max(0.0, 1.0 - distance * 0.5)
 
 
+# 对照岗位参考要求和用户已知资格，生成准备与待确认提示，供展示和报告引用。
 def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHint]:
     education_order = ["本科", "硕士"]
     fields = (
@@ -128,6 +139,7 @@ def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHi
     )
     hints = []
     for tag_id, name, requirement, current in fields:
+        # 不限要求无需提示。岗位要求未知或咨询方尚未提供时，用待确认提示保留信息缺口。
         if requirement in ("不限", 0):
             continue
         if requirement is None:
@@ -162,9 +174,11 @@ def qualification_hints(profile: Profile, job: MatchJob) -> list[QualificationHi
     return hints
 
 
+# 用已加载的数据筛选硬条件并计算软偏好均分，返回稳定排序的候选及解释明细。
 def match_jobs(
     profile: Profile, jobs: Iterable[MatchJob], dictionary: Mapping[str, TagDefinition],
 ) -> list[MatchResult]:
+    # 资格字段留给后面的准备提示，避免把当前报考资格当作未来规划的硬条件。
     preferences = [
         (preference, dictionary[tag_id]) for tag_id, preference in sorted(profile.preferences.items())
         if dictionary[tag_id].match_rule != "资格参考"
@@ -181,6 +195,7 @@ def match_jobs(
         for preference, definition in hard:
             fact = job_fact(job, definition)
             if fact is None:
+                # 缺资料的硬条件先标记待确认，只有已知不满足时才淘汰岗位。
                 name = "出差情况" if preference.tag_id == "T003" else definition.name
                 hard_conditions.append(PreferenceAssessment(
                     preference.tag_id, definition.name, preference.value, None, None,
@@ -188,6 +203,7 @@ def match_jobs(
                 ))
                 continue
             if preference.tag_id == "T003":
+                # 出差频率按允许值中的顺序比较上限，城市和职业方向按允许范围匹配。
                 order = definition.allowed_values
                 confirmed = order.index(fact.value) <= order.index(cast(str, preference.value))
             else:
@@ -207,6 +223,7 @@ def match_jobs(
         for preference, definition in soft:
             fact = job_fact(job, definition)
             if fact is None:
+                # 未知项只进入明细和覆盖统计，已知的不满足则以零分计入平均。
                 soft_scores.append(PreferenceAssessment(
                     preference.tag_id, definition.name, preference.value, None, None,
                     "pending_confirmation", None, f"岗位{definition.name}未知，需确认",
@@ -225,6 +242,7 @@ def match_jobs(
                 status, score, f"岗位{definition.name}为{fact.value}，{description}",
             ))
 
+        # 分开汇总未知硬条件与未知软偏好，候选状态和评分覆盖分别使用各自的统计。
         unknown_hard = [item.tag_id for item in hard_conditions if item.status == "pending_confirmation"]
         unknown_soft = [item.tag_id for item in soft_scores if item.status == "pending_confirmation"]
         matches.append(MatchResult(
@@ -242,10 +260,13 @@ def match_jobs(
             unknown_tags=unknown_hard + unknown_soft,
             qualification_hints=qualification_hints(profile, job),
         ))
+    # 无可评分项放在末尾，同分按岗位 ID 排序，便于复现结果。
     return sorted(matches, key=lambda match: (match.score is None, -(match.score or 0.0), match.job_id))
 
 
+# 组装会话画像、可匹配岗位和标签字典，将数据交给不访问数据库的匹配函数。
 def match_session(session_id: UUID) -> list[MatchResult]:
+    # 在这里读取数据库并组装岗位。match_jobs 接收已加载的数据，可直接用固定样本测试。
     profile = get_profile(session_id)
     with connect() as conn:
         dictionary = load_dictionary(conn)
